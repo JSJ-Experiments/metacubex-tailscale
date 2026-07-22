@@ -87,6 +87,8 @@ type endpoint struct {
 	lastUDPRelayPathDiscovery mono.Time      // last time we ran UDP relay path discovery
 	lastDiscoKeyAdvertisement mono.Time      // last time we sent a TSMPDiscoAdvertisement or not to this endpoint
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
+	relayPreference           relayPreferenceForEndpoint
+	failedPreferredDERP       map[int]mono.Time
 
 	bestAddr           addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
 	bestAddrAt         mono.Time   // time best address re-confirmed
@@ -116,6 +118,21 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 	curBestAddrTrusted := now.Before(de.trustBestAddrUntil)
 	sameRelayServer := de.bestAddr.vni.IsSet() && maybeBest.relayServerDisco.Compare(de.bestAddr.relayServerDisco) == 0
 
+	if de.relayPreference.enabled {
+		if !maybeBest.preferredRelay {
+			return
+		}
+		currentRank, currentOrdered := de.bestConnectionOrderRankLocked(now)
+		if !curBestAddrTrusted || !currentOrdered ||
+			maybeBest.relayPreferenceRank < currentRank ||
+			de.bestAddr.relayServerDisco.Compare(maybeBest.relayServerDisco) == 0 {
+			de.c.logf("magicsock: connection order: node %v now using %v", de.publicKey.ShortString(), maybeBest.epAddr)
+			de.setBestAddrLocked(maybeBest)
+			de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
+		}
+		return
+	}
+
 	if !curBestAddrTrusted ||
 		sameRelayServer ||
 		betterAddr(maybeBest, de.bestAddr) {
@@ -132,6 +149,59 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 		de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v", de.publicKey.ShortString(), de.discoShort(), maybeBest.epAddr, maybeBest.wireMTU)
 		de.setBestAddrLocked(maybeBest)
 		de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
+	}
+}
+
+func (de *endpoint) bestConnectionOrderRankLocked(now mono.Time) (rank int, ok bool) {
+	if now.After(de.trustBestAddrUntil) {
+		return 0, false
+	}
+	switch {
+	case de.bestAddr.epAddr.isDirect() && de.relayPreference.directRank >= 0:
+		return de.relayPreference.directRank, true
+	case de.bestAddr.vni.IsSet() && de.bestAddr.preferredRelay:
+		return de.bestAddr.relayPreferenceRank, true
+	default:
+		return 0, false
+	}
+}
+
+const preferredDERPFailureBackoff = 30 * time.Second
+
+func (de *endpoint) preferredDERPFailedLocked(rank int, now mono.Time) bool {
+	failedAt, failed := de.failedPreferredDERP[rank]
+	if !failed {
+		return false
+	}
+	if now.Sub(failedAt) >= preferredDERPFailureBackoff {
+		delete(de.failedPreferredDERP, rank)
+		return false
+	}
+	return true
+}
+
+func (de *endpoint) notePreferredDERPFailure(regionID int) {
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	for _, derp := range de.relayPreference.derpFallbacks {
+		if int(derp.addr.Port()) == regionID {
+			if de.failedPreferredDERP == nil {
+				de.failedPreferredDERP = make(map[int]mono.Time)
+			}
+			de.failedPreferredDERP[derp.rank] = mono.Now()
+			return
+		}
+	}
+}
+
+func (de *endpoint) notePreferredDERPReachable(regionID int) {
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	for _, derp := range de.relayPreference.derpFallbacks {
+		if int(derp.addr.Port()) == regionID {
+			delete(de.failedPreferredDERP, derp.rank)
+			return
+		}
 	}
 }
 
@@ -575,6 +645,21 @@ func (de *endpoint) DstToBytes() []byte  { return packIPPort(de.fakeWGAddr) }
 // TODO(val): Rewrite the addrFor*Locked() variations to share code.
 func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr netip.AddrPort, sendWGPing bool) {
 	udpAddr = de.bestAddr.epAddr
+	if de.relayPreference.enabled {
+		peerRelayRank := math.MaxInt
+		if rank, ok := de.bestConnectionOrderRankLocked(now); ok {
+			peerRelayRank = rank
+		}
+		for _, derp := range de.relayPreference.derpFallbacks {
+			if !de.preferredDERPFailedLocked(derp.rank, now) && derp.rank < peerRelayRank {
+				return epAddr{}, derp.addr, false
+			}
+		}
+		if peerRelayRank != math.MaxInt {
+			return udpAddr, netip.AddrPort{}, false
+		}
+		return epAddr{}, netip.AddrPort{}, false
+	}
 
 	if udpAddr.ap.IsValid() && !now.After(de.trustBestAddrUntil) {
 		return udpAddr, netip.AddrPort{}, false
@@ -890,7 +975,7 @@ func (de *endpoint) discoverUDPRelayPathsLocked(now mono.Time) {
 	de.lastUDPRelayPathDiscovery = now
 	lastBest := de.bestAddr
 	lastBestIsTrusted := mono.Now().Before(de.trustBestAddrUntil)
-	de.c.relayManager.startUDPRelayPathDiscoveryFor(de, lastBest, lastBestIsTrusted)
+	de.c.relayManager.startUDPRelayPathDiscoveryFor(de, lastBest, lastBestIsTrusted, de.relayPreference)
 }
 
 // wantUDPRelayPathDiscoveryLocked reports whether we should kick off UDP relay
@@ -1051,6 +1136,15 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 
 	now := mono.Now()
 	udpAddr, derpAddr, startWGPing := de.addrForSendLocked(now)
+	derpRank := -1
+	if de.relayPreference.enabled {
+		for _, preferred := range de.relayPreference.derpFallbacks {
+			if preferred.addr == derpAddr {
+				derpRank = preferred.rank
+				break
+			}
+		}
+	}
 
 	if de.isWireguardOnly {
 		if startWGPing {
@@ -1124,10 +1218,13 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			buff = buff[offset:]
 			const isDisco = false
 			const isGeneveEncap = false
-			ok, _ := de.c.sendAddr(derpAddr, de.publicKey, buff, isDisco, isGeneveEncap)
+			ok, sendErr := de.c.sendAddr(derpAddr, de.publicKey, buff, isDisco, isGeneveEncap)
 			txBytes += len(buff)
 			if !ok {
 				allOk = false
+			}
+			if err == nil {
+				err = sendErr
 			}
 		}
 
@@ -1136,6 +1233,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 		if allOk {
 			return nil
+		}
+		if derpRank >= 0 {
+			de.notePreferredDERPFailure(int(derpAddr.Port()))
 		}
 	}
 	return err
@@ -1537,6 +1637,8 @@ func (de *endpoint) updateFromNode(n tailcfg.NodeView, heartbeatDisabled bool, p
 		}
 		de.derpAddr = newDerp
 	}
+	de.relayPreference = de.c.relayPreferenceForNode(n)
+	de.failedPreferredDERP = nil
 
 	de.setEndpointsLocked(n.Endpoints())
 
@@ -1781,7 +1883,18 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 			wireMTU: pingSizeToPktLen(sp.size, sp.to),
 		}
 		bestUntrusted := now.After(de.trustBestAddrUntil)
-		if betterAddr(thisPong, de.bestAddr) || bestUntrusted {
+		useThisPong := betterAddr(thisPong, de.bestAddr) || bestUntrusted
+		if de.relayPreference.enabled {
+			if de.relayPreference.directRank < 0 {
+				useThisPong = false
+			} else if currentRank, currentOrdered := de.bestConnectionOrderRankLocked(now); !currentOrdered {
+				useThisPong = true
+			} else {
+				useThisPong = de.bestAddr.epAddr == thisPong.epAddr ||
+					de.relayPreference.directRank < currentRank
+			}
+		}
+		if useThisPong {
 			de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
 			de.debugUpdates.Add(EndpointChange{
 				When: time.Now(),
@@ -1830,9 +1943,11 @@ func (e epAddr) String() string {
 // is associated, a round-trip latency measurement, and path mtu.
 type addrQuality struct {
 	epAddr
-	relayServerDisco key.DiscoPublic // only relevant if epAddr.vni.isSet(), otherwise zero value
-	latency          time.Duration
-	wireMTU          tstun.WireMTU
+	relayServerDisco    key.DiscoPublic // only relevant if epAddr.vni.isSet(), otherwise zero value
+	preferredRelay      bool            // whether this path came from an explicit connection order
+	relayPreferenceRank int             // only relevant when preferredRelay is true
+	latency             time.Duration
+	wireMTU             tstun.WireMTU
 }
 
 func (a addrQuality) String() string {

@@ -256,6 +256,9 @@ type Conn struct {
 	// sync.Mutex. For use with NewRegionClient's callback, to avoid
 	// lock ordering deadlocks. See issue 3726 and mu field docs.
 	derpMapAtomic atomic.Pointer[tailcfg.DERPMap]
+	// relayPreferenceSet contains optional per-peer connection orders. It is
+	// immutable after publication.
+	relayPreferenceSet atomic.Pointer[relayPreferenceSet]
 
 	lastNetCheckReport atomic.Pointer[netcheck.Report]
 
@@ -2937,6 +2940,7 @@ func (c *Conn) updateRelayServersSet(filt *filter.Filter, self tailcfg.NodeView,
 			nodeKey:          maybeCandidate.Key(),
 			discoKey:         maybeCandidate.DiscoKey(),
 			derpHomeRegionID: uint16(maybeCandidate.HomeDERP()),
+			tailscaleIP:      nodePrimaryTailscaleIP(maybeCandidate),
 		})
 	}
 	// [relayManager]'s run loop updates [relayManager.hasPeerRelayServers]
@@ -2986,6 +2990,7 @@ type candidatePeerRelay struct {
 	nodeKey          key.NodePublic
 	discoKey         key.DiscoPublic
 	derpHomeRegionID uint16
+	tailscaleIP      netip.Addr
 }
 
 func (c *candidatePeerRelay) isValid() bool {
@@ -3337,6 +3342,7 @@ func (c *Conn) relayCandidateLocked(p tailcfg.NodeView) (ok bool, cp candidatePe
 		nodeKey:          p.Key(),
 		discoKey:         p.DiscoKey(),
 		derpHomeRegionID: uint16(p.HomeDERP()),
+		tailscaleIP:      nodePrimaryTailscaleIP(p),
 	}
 }
 

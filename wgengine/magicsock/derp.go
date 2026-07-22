@@ -650,6 +650,7 @@ func (c *Conn) runDerpReader(ctx context.Context, regionID int, dc *derphttp.Cli
 			c.health.SetDERPRegionHealth(regionID, m.Problem)
 			continue
 		case derp.PeerGoneMessage:
+			c.notePreferredDERPFailure(key.NodePublic(m.Peer), regionID)
 			switch m.Reason {
 			case derp.PeerGoneReasonDisconnected:
 				// Do nothing.
@@ -766,6 +767,7 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 	}
 
 	ep.noteRecvActivity(srcAddr, mono.Now())
+	ep.notePreferredDERPReachable(regionID)
 	if update := c.connCounter.Load(); update != nil {
 		update(0, netip.AddrPortFrom(ep.nodeAddr, 0), srcAddr.ap, 1, dm.n, true)
 	}
@@ -773,6 +775,15 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 	c.metrics.inboundPacketsDERPTotal.Add(1)
 	c.metrics.inboundBytesDERPTotal.Add(int64(n))
 	return n, ep
+}
+
+func (c *Conn) notePreferredDERPFailure(peer key.NodePublic, regionID int) {
+	c.mu.Lock()
+	ep, ok := c.peerMap.endpointForNodeKey(peer)
+	c.mu.Unlock()
+	if ok {
+		ep.notePreferredDERPFailure(regionID)
+	}
 }
 
 // SendDERPPacketTo sends an arbitrary packet to the given node key via
