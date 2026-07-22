@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,9 +90,11 @@ type serverDiscoVNI struct {
 // relayHandshakeWork serves to track in-progress relay handshake work for a
 // [udprelay.ServerEndpoint]. This structure is immutable once initialized.
 type relayHandshakeWork struct {
-	wlb    endpointWithLastBest
-	se     udprelay.ServerEndpoint
-	server candidatePeerRelay
+	wlb            endpointWithLastBest
+	se             udprelay.ServerEndpoint
+	server         candidatePeerRelay
+	preferenceRank int
+	preferred      bool
 
 	handshakeGen uint32
 
@@ -132,9 +135,11 @@ func (r *relayHandshakeWork) dlogf(format string, args ...any) {
 // [disco.CallMeMaybeVia] reception. This structure is immutable once
 // initialized.
 type newRelayServerEndpointEvent struct {
-	wlb    endpointWithLastBest
-	se     udprelay.ServerEndpoint
-	server candidatePeerRelay // zero value if learned via [disco.CallMeMaybeVia]
+	wlb            endpointWithLastBest
+	se             udprelay.ServerEndpoint
+	server         candidatePeerRelay // zero value if learned via [disco.CallMeMaybeVia]
+	preferenceRank int                // -1 if not from an explicit preference
+	preferred      bool
 }
 
 // relayEndpointAllocWorkDoneEvent indicates relay server endpoint allocation
@@ -332,6 +337,8 @@ type relayEndpointAllocWork struct {
 	wlb                endpointWithLastBest
 	discoKeys          key.SortedPairOfDiscoPublic
 	candidatePeerRelay candidatePeerRelay // zero value if learned via [disco.CallMeMaybeVia]
+	preferenceRank     int                // -1 when no ordered preference applies
+	preferred          bool
 
 	allocGen uint32
 
@@ -536,15 +543,17 @@ type endpointWithLastBest struct {
 	ep                *endpoint
 	lastBest          addrQuality
 	lastBestIsTrusted bool
+	relayPreference   relayPreferenceForEndpoint
 }
 
 // startUDPRelayPathDiscoveryFor starts UDP relay path discovery for ep on all
 // known relay servers if ep has no in-progress work.
-func (r *relayManager) startUDPRelayPathDiscoveryFor(ep *endpoint, lastBest addrQuality, lastBestIsTrusted bool) {
+func (r *relayManager) startUDPRelayPathDiscoveryFor(ep *endpoint, lastBest addrQuality, lastBestIsTrusted bool, relayPreference relayPreferenceForEndpoint) {
 	relayManagerInputEvent(r, nil, &r.startDiscoveryCh, endpointWithLastBest{
 		ep:                ep,
 		lastBest:          lastBest,
 		lastBestIsTrusted: lastBestIsTrusted,
+		relayPreference:   relayPreference,
 	})
 }
 
@@ -699,9 +708,11 @@ func (r *relayManager) handleAllocWorkDoneRunLoop(done relayEndpointAllocWorkDon
 	}
 	if !done.allocated.ServerDisco.IsZero() {
 		r.handleNewServerEndpointRunLoop(newRelayServerEndpointEvent{
-			wlb:    done.work.wlb,
-			se:     done.allocated,
-			server: done.work.candidatePeerRelay,
+			wlb:            done.work.wlb,
+			se:             done.allocated,
+			server:         done.work.candidatePeerRelay,
+			preferenceRank: done.work.preferenceRank,
+			preferred:      done.work.preferred,
 		})
 	}
 }
@@ -737,10 +748,12 @@ func (r *relayManager) handleHandshakeWorkDoneRunLoop(done relayEndpointHandshak
 	// deadlocks as it acquires [endpoint] & [Conn] mutexes. See [relayManager]
 	// docs for details.
 	go done.work.wlb.ep.udpRelayEndpointReady(addrQuality{
-		epAddr:           addr,
-		relayServerDisco: done.work.se.ServerDisco,
-		latency:          done.latency,
-		wireMTU:          pingSizeToPktLen(0, addr),
+		epAddr:              addr,
+		relayServerDisco:    done.work.se.ServerDisco,
+		preferredRelay:      done.work.preferred,
+		relayPreferenceRank: done.work.preferenceRank,
+		latency:             done.latency,
+		wireMTU:             pingSizeToPktLen(0, addr),
 	})
 }
 
@@ -817,13 +830,15 @@ func (r *relayManager) handleNewServerEndpointRunLoop(newServerEndpoint newRelay
 	// We're ready to start a new handshake.
 	ctx, cancel := context.WithCancel(context.Background())
 	work := &relayHandshakeWork{
-		wlb:          newServerEndpoint.wlb,
-		se:           newServerEndpoint.se,
-		server:       newServerEndpoint.server,
-		rxDiscoMsgCh: make(chan relayDiscoMsgEvent),
-		doneCh:       make(chan relayEndpointHandshakeWorkDoneEvent, 1),
-		ctx:          ctx,
-		cancel:       cancel,
+		wlb:            newServerEndpoint.wlb,
+		se:             newServerEndpoint.se,
+		server:         newServerEndpoint.server,
+		preferenceRank: newServerEndpoint.preferenceRank,
+		preferred:      newServerEndpoint.preferred,
+		rxDiscoMsgCh:   make(chan relayDiscoMsgEvent),
+		doneCh:         make(chan relayEndpointHandshakeWorkDoneEvent, 1),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 	// We must look up byServerDisco again. The previous value may have been
 	// deleted from the outer map when cleaning up duplicate work.
@@ -1097,8 +1112,27 @@ func (r *relayManager) allocateAllServersRunLoop(wlb endpointWithLastBest) {
 	if remoteDisco == nil {
 		return
 	}
+	type candidateWithRank struct {
+		candidate candidatePeerRelay
+		rank      int
+	}
+	candidates := make([]candidateWithRank, 0, len(r.serversByNodeKey))
+	for _, candidate := range r.serversByNodeKey {
+		rank := -1
+		if wlb.relayPreference.enabled {
+			var ok bool
+			rank, ok = wlb.relayPreference.peerRelayRanks[candidate.tailscaleIP]
+			if !ok {
+				continue
+			}
+		}
+		candidates = append(candidates, candidateWithRank{candidate, rank})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].rank < candidates[j].rank })
+
 	discoKeys := key.NewSortedPairOfDiscoPublic(wlb.ep.c.discoAtomic.Public(), remoteDisco.key)
-	for _, v := range r.serversByNodeKey {
+	for _, candidate := range candidates {
+		v := candidate.candidate
 		byDiscoKeys, ok := r.allocWorkByDiscoKeysByServerNodeKey[v.nodeKey]
 		if !ok {
 			byDiscoKeys = make(map[key.SortedPairOfDiscoPublic]*relayEndpointAllocWork)
@@ -1118,6 +1152,8 @@ func (r *relayManager) allocateAllServersRunLoop(wlb endpointWithLastBest) {
 			wlb:                wlb,
 			discoKeys:          discoKeys,
 			candidatePeerRelay: v,
+			preferenceRank:     candidate.rank,
+			preferred:          candidate.rank >= 0,
 			rxDiscoMsgCh:       make(chan *disco.AllocateUDPRelayEndpointResponse),
 			doneCh:             make(chan relayEndpointAllocWorkDoneEvent, 1),
 			ctx:                ctx,

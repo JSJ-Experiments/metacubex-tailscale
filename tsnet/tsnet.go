@@ -200,6 +200,7 @@ import (
 	"github.com/metacubex/tailscale/util/set"
 	"github.com/metacubex/tailscale/util/testenv"
 	"github.com/metacubex/tailscale/wgengine"
+	"github.com/metacubex/tailscale/wgengine/magicsock"
 	"github.com/metacubex/tailscale/wgengine/netstack"
 )
 
@@ -315,6 +316,18 @@ type Server struct {
 	// LookupHook optionally specifies how tsnet resolves non-Tailscale
 	// infrastructure hostnames such as control and DERP.
 	LookupHook dnscache.LookupHookFunc
+
+	// ConnectionOrder optionally sets ordered direct, peer-relay, and DERP
+	// paths for individual Tailscale peers. See [magicsock.ConnectionOrder].
+	//
+	// This is an extension provided by the metacubex Tailscale fork. Leave it
+	// empty to retain standard Tailscale path selection.
+	ConnectionOrder []magicsock.ConnectionOrder
+
+	// RelayPreferences is the former name of ConnectionOrder.
+	//
+	// Deprecated: use ConnectionOrder.
+	RelayPreferences []magicsock.RelayPreference
 
 	// AdvertiseTags specifies tags that should be applied to this node, for
 	// purposes of ACL enforcement. These can be referenced from the ACL policy
@@ -930,6 +943,11 @@ func (s *Server) start() (reterr error) {
 	}
 	closePool.add(s.dialer)
 	sys.Set(eng)
+	connectionOrder := s.ConnectionOrder
+	if len(connectionOrder) == 0 {
+		connectionOrder = s.RelayPreferences
+	}
+	sys.MagicSock.Get().SetConnectionOrder(connectionOrder)
 	sys.HealthTracker.Get().SetMetricsRegistry(sys.UserMetricsRegistry())
 
 	// TODO(oxtoacart): do we need to support Taildrive on tsnet, and if so, how?
