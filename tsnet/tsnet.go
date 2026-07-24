@@ -329,6 +329,9 @@ type Server struct {
 	// Deprecated: use ConnectionOrder.
 	RelayPreferences []magicsock.RelayPreference
 
+	connectionOrderMu        sync.Mutex
+	connectionOrderMagicSock *magicsock.Conn
+
 	// AdvertiseTags specifies tags that should be applied to this node, for
 	// purposes of ACL enforcement. These can be referenced from the ACL policy
 	// document. Note that advertising a tag on the client doesn't guarantee
@@ -943,11 +946,14 @@ func (s *Server) start() (reterr error) {
 	}
 	closePool.add(s.dialer)
 	sys.Set(eng)
-	connectionOrder := s.ConnectionOrder
+	s.connectionOrderMu.Lock()
+	connectionOrder := cloneConnectionOrder(s.ConnectionOrder)
 	if len(connectionOrder) == 0 {
-		connectionOrder = s.RelayPreferences
+		connectionOrder = cloneConnectionOrder(s.RelayPreferences)
 	}
-	sys.MagicSock.Get().SetConnectionOrder(connectionOrder)
+	s.connectionOrderMagicSock = sys.MagicSock.Get()
+	s.connectionOrderMagicSock.SetConnectionOrder(connectionOrder)
+	s.connectionOrderMu.Unlock()
 	sys.HealthTracker.Get().SetMetricsRegistry(sys.UserMetricsRegistry())
 
 	// TODO(oxtoacart): do we need to support Taildrive on tsnet, and if so, how?
