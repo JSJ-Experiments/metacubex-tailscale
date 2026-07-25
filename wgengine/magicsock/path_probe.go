@@ -188,7 +188,7 @@ func (de *endpoint) connectionPathCandidatesLocked(paths []string) []connectionP
 			regionCode := strings.ToUpper(path)
 			if dm != nil {
 				for id, region := range dm.Regions {
-					if strings.EqualFold(region.RegionCode, path) {
+					if connectionDERPCodeMatches(path, region.RegionCode) {
 						regionID = id
 						regionCode = region.RegionCode
 						break

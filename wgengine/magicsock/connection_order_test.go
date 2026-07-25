@@ -17,7 +17,7 @@ import (
 func TestConnectionPathCandidates(t *testing.T) {
 	c := newConn(logger.Discard)
 	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
-		1: {RegionID: 1, RegionCode: "TYO"},
+		1: {RegionID: 1, RegionCode: "tok"},
 	}})
 	direct := netip.MustParseAddrPort("192.0.2.1:41641")
 	relayIP := netip.MustParseAddr("100.91.245.79")
@@ -42,7 +42,7 @@ func TestConnectionPathCandidates(t *testing.T) {
 	if got[1].path != relayIP.String() || got[1].addr.ap != relayAddr || !got[1].addr.vni.IsSet() {
 		t.Fatalf("peer relay candidate = %#v", got[1])
 	}
-	if got[2].path != "TYO" || got[2].addr.ap.Port() != 1 || got[2].addr.ap.Addr() != tailcfg.DerpMagicIPAddr {
+	if got[2].path != "tok" || got[2].addr.ap.Port() != 1 || got[2].addr.ap.Addr() != tailcfg.DerpMagicIPAddr {
 		t.Fatalf("DERP candidate = %#v", got[2])
 	}
 	if got[3].err == nil {
@@ -72,7 +72,7 @@ func TestConnectionOrderForNode(t *testing.T) {
 	lastRelay := netip.MustParseAddr("100.67.42.33")
 	c := newConn(logger.Discard)
 	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
-		1: {RegionID: 1, RegionCode: "TYO"},
+		1: {RegionID: 1, RegionCode: "tok"},
 		2: {RegionID: 2, RegionCode: "SIN"},
 		3: {RegionID: 3, RegionCode: "FRA"},
 	}})

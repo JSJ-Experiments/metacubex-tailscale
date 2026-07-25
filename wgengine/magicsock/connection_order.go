@@ -47,6 +47,19 @@ type preferredDERP struct {
 	rank int
 }
 
+// connectionDERPCodeMatches accepts both the DERP map's canonical region code
+// and compatibility aliases used by existing connection-order files.
+//
+// Tailscale's public DERP map calls Tokyo "tok", while older metacubex
+// connection-order examples and deployments use the IATA metropolitan code
+// "TYO". Keep accepting TYO so those files continue to select Tokyo.
+func connectionDERPCodeMatches(requested, canonical string) bool {
+	if strings.EqualFold(requested, canonical) {
+		return true
+	}
+	return strings.EqualFold(requested, "TYO") && strings.EqualFold(canonical, "TOK")
+}
+
 func nodePrimaryTailscaleIP(n tailcfg.NodeView) netip.Addr {
 	var result netip.Addr
 	n.Addresses().All()(func(_ int, prefix netip.Prefix) bool {
@@ -144,7 +157,7 @@ func (c *Conn) relayPreferenceForTarget(target netip.Addr) relayPreferenceForEnd
 			continue
 		}
 		for regionID, region := range dm.Regions {
-			if strings.EqualFold(path, region.RegionCode) {
+			if connectionDERPCodeMatches(path, region.RegionCode) {
 				preference.derpFallbacks = append(preference.derpFallbacks, preferredDERP{
 					addr: netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(regionID)),
 					rank: rank,
