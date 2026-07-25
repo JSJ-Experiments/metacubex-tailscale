@@ -1420,6 +1420,13 @@ const (
 	pingPathProbe
 )
 
+// allowsInactiveEndpoint reports whether a caller may explicitly probe an
+// address that is not one of the endpoint's discovered direct UDP addresses.
+// DERP and requested peer-relay path probes necessarily fall into this group.
+func (p discoPingPurpose) allowsInactiveEndpoint() bool {
+	return p == pingCLI || p == pingPathProbe
+}
+
 // startDiscoPingLocked sends a disco ping to ep in a separate goroutine. resCB,
 // if non-nil, means that a caller external to the magicsock package internals
 // is interested in the result (such as a CLI "tailscale ping" or a c2n ping
@@ -1435,7 +1442,7 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 	if epDisco == nil {
 		return
 	}
-	if purpose != pingCLI &&
+	if !purpose.allowsInactiveEndpoint() &&
 		!ep.vni.IsSet() { // de.endpointState is only relevant for direct/non-vni epAddr's
 		st, ok := de.endpointState[ep.ap]
 		if !ok {

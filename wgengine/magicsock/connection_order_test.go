@@ -50,6 +50,18 @@ func TestConnectionPathCandidates(t *testing.T) {
 	}
 }
 
+func TestPathProbeAllowsExplicitRelayEndpoint(t *testing.T) {
+	if !pingPathProbe.allowsInactiveEndpoint() {
+		t.Fatal("path probes must allow explicitly requested DERP or peer-relay endpoints")
+	}
+	if !pingCLI.allowsInactiveEndpoint() {
+		t.Fatal("CLI probes must retain support for explicit endpoints")
+	}
+	if pingDiscovery.allowsInactiveEndpoint() {
+		t.Fatal("background discovery must remain limited to active endpoints")
+	}
+}
+
 func TestConnectionPathOptions(t *testing.T) {
 	c := newConn(logger.Discard)
 	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
