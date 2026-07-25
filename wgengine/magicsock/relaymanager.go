@@ -750,6 +750,7 @@ func (r *relayManager) handleHandshakeWorkDoneRunLoop(done relayEndpointHandshak
 	go done.work.wlb.ep.udpRelayEndpointReady(addrQuality{
 		epAddr:              addr,
 		relayServerDisco:    done.work.se.ServerDisco,
+		relayServerIP:       done.work.server.tailscaleIP,
 		preferredRelay:      done.work.preferred,
 		relayPreferenceRank: done.work.preferenceRank,
 		latency:             done.latency,

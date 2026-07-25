@@ -89,6 +89,7 @@ type endpoint struct {
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 	relayPreference           relayPreferenceForEndpoint
 	failedPreferredDERP       map[int]mono.Time
+	preferredRelayPaths       map[netip.Addr]addrQuality
 
 	bestAddr           addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
 	bestAddrAt         mono.Time   // time best address re-confirmed
@@ -122,6 +123,10 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 		if !maybeBest.preferredRelay {
 			return
 		}
+		if de.preferredRelayPaths == nil {
+			de.preferredRelayPaths = make(map[netip.Addr]addrQuality)
+		}
+		de.preferredRelayPaths[maybeBest.relayServerIP] = maybeBest
 		currentRank, currentOrdered := de.bestConnectionOrderRankLocked(now)
 		if !curBestAddrTrusted || !currentOrdered ||
 			maybeBest.relayPreferenceRank < currentRank ||
@@ -1383,6 +1388,10 @@ const (
 	// discover whether the UDP path was still active through any and all
 	// stateful middleboxes involved.
 	pingHeartbeatForUDPLifetime
+
+	// pingPathProbe explicitly measures one selected path for diagnostics. Its
+	// pong must not promote that path to bestAddr.
+	pingPathProbe
 )
 
 // startDiscoPingLocked sends a disco ping to ep in a separate goroutine. resCB,
@@ -1639,6 +1648,7 @@ func (de *endpoint) updateFromNode(n tailcfg.NodeView, heartbeatDisabled bool, p
 	}
 	de.relayPreference = de.c.relayPreferenceForNode(n)
 	de.failedPreferredDERP = nil
+	de.preferredRelayPaths = nil
 
 	de.setEndpointsLocked(n.Endpoints())
 
@@ -1866,9 +1876,8 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 		}))
 	}
 
-	// Currently only CLI ping uses this callback.
 	if sp.resCB.reply() {
-		if sp.purpose == pingCLI {
+		if sp.purpose == pingCLI || sp.purpose == pingPathProbe {
 			de.c.populateCLIPingResponseLocked(sp.resCB.res, latency, sp.to)
 		}
 		go sp.resCB.cb(sp.resCB.res)
@@ -1876,22 +1885,35 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 
 	// Promote this pong response to our current best address if it's lower latency.
 	// TODO(bradfitz): decide how latency vs. preference order affects decision
-	if !isDerp {
+	if !isDerp && sp.purpose != pingPathProbe {
 		thisPong := addrQuality{
 			epAddr:  sp.to,
 			latency: latency,
 			wireMTU: pingSizeToPktLen(sp.size, sp.to),
 		}
+		if sp.to.vni.IsSet() && de.bestAddr.epAddr == sp.to {
+			thisPong.relayServerDisco = de.bestAddr.relayServerDisco
+			thisPong.relayServerIP = de.bestAddr.relayServerIP
+			thisPong.preferredRelay = de.bestAddr.preferredRelay
+			thisPong.relayPreferenceRank = de.bestAddr.relayPreferenceRank
+		}
 		bestUntrusted := now.After(de.trustBestAddrUntil)
 		useThisPong := betterAddr(thisPong, de.bestAddr) || bestUntrusted
 		if de.relayPreference.enabled {
-			if de.relayPreference.directRank < 0 {
+			candidateRank := -1
+			switch {
+			case thisPong.epAddr.isDirect():
+				candidateRank = de.relayPreference.directRank
+			case thisPong.preferredRelay:
+				candidateRank = thisPong.relayPreferenceRank
+			}
+			if candidateRank < 0 {
 				useThisPong = false
 			} else if currentRank, currentOrdered := de.bestConnectionOrderRankLocked(now); !currentOrdered {
 				useThisPong = true
 			} else {
 				useThisPong = de.bestAddr.epAddr == thisPong.epAddr ||
-					de.relayPreference.directRank < currentRank
+					candidateRank < currentRank
 			}
 		}
 		if useThisPong {
@@ -1944,6 +1966,7 @@ func (e epAddr) String() string {
 type addrQuality struct {
 	epAddr
 	relayServerDisco    key.DiscoPublic // only relevant if epAddr.vni.isSet(), otherwise zero value
+	relayServerIP       netip.Addr      // Tailscale IP of the peer relay server
 	preferredRelay      bool            // whether this path came from an explicit connection order
 	relayPreferenceRank int             // only relevant when preferredRelay is true
 	latency             time.Duration

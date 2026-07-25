@@ -8,10 +8,63 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/tailscale/net/packet"
 	"github.com/metacubex/tailscale/tailcfg"
 	"github.com/metacubex/tailscale/tstime/mono"
 	"github.com/metacubex/tailscale/types/logger"
 )
+
+func TestConnectionPathCandidates(t *testing.T) {
+	c := newConn(logger.Discard)
+	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
+		1: {RegionID: 1, RegionCode: "TYO"},
+	}})
+	direct := netip.MustParseAddrPort("192.0.2.1:41641")
+	relayIP := netip.MustParseAddr("100.91.245.79")
+	relayAddr := netip.MustParseAddrPort("198.51.100.1:40000")
+	vni := packet.VirtualNetworkID{}
+	vni.Set(7)
+	ep := &endpoint{
+		c:             c,
+		endpointState: map[netip.AddrPort]*endpointState{direct: {}},
+		preferredRelayPaths: map[netip.Addr]addrQuality{
+			relayIP: {epAddr: epAddr{ap: relayAddr, vni: vni}},
+		},
+	}
+
+	got := ep.connectionPathCandidatesLocked([]string{"DIRECT", relayIP.String(), "tyo", "XXX"})
+	if len(got) != 4 {
+		t.Fatalf("candidate count = %d, want 4", len(got))
+	}
+	if got[0].path != "DIRECT" || got[0].addr.ap != direct {
+		t.Fatalf("direct candidate = %#v", got[0])
+	}
+	if got[1].path != relayIP.String() || got[1].addr.ap != relayAddr || !got[1].addr.vni.IsSet() {
+		t.Fatalf("peer relay candidate = %#v", got[1])
+	}
+	if got[2].path != "TYO" || got[2].addr.ap.Port() != 1 || got[2].addr.ap.Addr() != tailcfg.DerpMagicIPAddr {
+		t.Fatalf("DERP candidate = %#v", got[2])
+	}
+	if got[3].err == nil {
+		t.Fatal("unknown DERP region was accepted")
+	}
+}
+
+func TestConnectionPathOptions(t *testing.T) {
+	c := newConn(logger.Discard)
+	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
+		2: {RegionID: 2, RegionCode: "TYO", RegionName: "Tokyo"},
+		1: {RegionID: 1, RegionCode: "FRA", RegionName: "Frankfurt"},
+	}})
+
+	got := c.ConnectionPathOptions()
+	if len(got.DERPRegions) != 2 {
+		t.Fatalf("DERP region count = %d, want 2", len(got.DERPRegions))
+	}
+	if got.DERPRegions[0].Code != "FRA" || got.DERPRegions[1].Code != "TYO" {
+		t.Fatalf("DERP regions = %#v, want FRA then TYO", got.DERPRegions)
+	}
+}
 
 func TestConnectionOrderForNode(t *testing.T) {
 	target := netip.MustParseAddr("100.120.147.123")

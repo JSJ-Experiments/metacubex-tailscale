@@ -3,7 +3,13 @@
 
 package tsnet
 
-import "github.com/metacubex/tailscale/wgengine/magicsock"
+import (
+	"context"
+	"fmt"
+	"net/netip"
+
+	"github.com/metacubex/tailscale/wgengine/magicsock"
+)
 
 func cloneConnectionOrder(orders []magicsock.ConnectionOrder) []magicsock.ConnectionOrder {
 	cloned := make([]magicsock.ConnectionOrder, len(orders))
@@ -27,4 +33,28 @@ func (s *Server) SetConnectionOrder(orders []magicsock.ConnectionOrder) {
 	if s.connectionOrderMagicSock != nil {
 		s.connectionOrderMagicSock.SetConnectionOrder(orders)
 	}
+}
+
+// ProbeConnectionPaths concurrently probes explicitly requested paths to a
+// peer without changing the selected data path.
+func (s *Server) ProbeConnectionPaths(ctx context.Context, target netip.Addr, paths []string) ([]magicsock.ConnectionPathProbe, error) {
+	s.connectionOrderMu.Lock()
+	magicSock := s.connectionOrderMagicSock
+	s.connectionOrderMu.Unlock()
+	if magicSock == nil {
+		return nil, fmt.Errorf("tsnet server is not started")
+	}
+	return magicSock.ProbeConnectionPaths(ctx, target, paths)
+}
+
+// ConnectionPathOptions returns currently known DERP regions and eligible peer
+// relay servers.
+func (s *Server) ConnectionPathOptions() (magicsock.ConnectionPathOptions, error) {
+	s.connectionOrderMu.Lock()
+	magicSock := s.connectionOrderMagicSock
+	s.connectionOrderMu.Unlock()
+	if magicSock == nil {
+		return magicsock.ConnectionPathOptions{}, fmt.Errorf("tsnet server is not started")
+	}
+	return magicSock.ConnectionPathOptions(), nil
 }
