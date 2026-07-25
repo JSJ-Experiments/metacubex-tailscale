@@ -121,6 +121,33 @@ func TestConnectionOrderForNode(t *testing.T) {
 	}
 }
 
+func TestSetConnectionOrderUpdatesExistingEndpoint(t *testing.T) {
+	target := netip.MustParseAddr("100.120.147.123")
+	c := newConn(logger.Discard)
+	c.derpMapAtomic.Store(&tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
+		1: {RegionID: 1, RegionCode: "TYO"},
+	}})
+	ep := &endpoint{
+		c:        c,
+		nodeAddr: target,
+	}
+	c.peerMap.byNodeKey[ep.publicKey] = newPeerInfo(ep)
+
+	c.SetConnectionOrder([]ConnectionOrder{{
+		Target: target,
+		Paths:  []string{"TYO", "DIRECT"},
+	}})
+
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	if !ep.relayPreference.enabled || ep.relayPreference.directRank != 1 {
+		t.Fatalf("live endpoint order = %#v", ep.relayPreference)
+	}
+	if len(ep.relayPreference.derpFallbacks) != 1 || ep.relayPreference.derpFallbacks[0].addr.Port() != 1 {
+		t.Fatalf("live endpoint DERP order = %#v", ep.relayPreference.derpFallbacks)
+	}
+}
+
 func TestConnectionOrderDirect(t *testing.T) {
 	target := netip.MustParseAddr("100.120.147.123")
 	relay := netip.MustParseAddr("100.91.245.79")

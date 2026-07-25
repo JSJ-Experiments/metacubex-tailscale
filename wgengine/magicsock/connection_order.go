@@ -60,8 +60,8 @@ func nodePrimaryTailscaleIP(n tailcfg.NodeView) netip.Addr {
 }
 
 // SetConnectionOrder sets per-peer connection orders. It is safe to call
-// before or after the connection is started; subsequent netmap updates apply
-// the latest orders to their endpoints.
+// before or after the connection is started; existing endpoints are updated
+// immediately and subsequent netmap updates retain the latest orders.
 func (c *Conn) SetConnectionOrder(orders []ConnectionOrder) {
 	set := &relayPreferenceSet{byTarget: make(map[netip.Addr][]string, len(orders))}
 	for _, order := range orders {
@@ -79,6 +79,15 @@ func (c *Conn) SetConnectionOrder(orders []ConnectionOrder) {
 		}
 	}
 	c.relayPreferenceSet.Store(set)
+
+	// Apply the new order to existing endpoints immediately. A netmap update
+	// may not arrive for a long time, especially while an on-device UI is
+	// being used to compare paths.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.peerMap.forEachEndpoint(func(ep *endpoint) {
+		ep.applyConnectionOrder(c.relayPreferenceForTarget(ep.nodeAddr))
+	})
 }
 
 // SetRelayPreferences is the former name of SetConnectionOrder.
@@ -89,18 +98,24 @@ func (c *Conn) SetRelayPreferences(preferences []RelayPreference) {
 }
 
 func (c *Conn) relayPreferenceForNode(n tailcfg.NodeView) relayPreferenceForEndpoint {
+	var target netip.Addr
+	n.Addresses().All()(func(_ int, prefix netip.Prefix) bool {
+		if prefix.IsSingleIP() && prefix.Addr().IsValid() {
+			target = prefix.Addr()
+			return false
+		}
+		return true
+	})
+	return c.relayPreferenceForTarget(target)
+}
+
+func (c *Conn) relayPreferenceForTarget(target netip.Addr) relayPreferenceForEndpoint {
 	set := c.relayPreferenceSet.Load()
 	if set == nil || len(set.byTarget) == 0 {
 		return relayPreferenceForEndpoint{}
 	}
 
-	var paths []string
-	n.Addresses().All()(func(_ int, prefix netip.Prefix) bool {
-		if paths = set.byTarget[prefix.Addr()]; len(paths) != 0 {
-			return false
-		}
-		return true
-	})
+	paths := set.byTarget[target]
 	if len(paths) == 0 {
 		return relayPreferenceForEndpoint{}
 	}

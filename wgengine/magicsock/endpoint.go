@@ -157,6 +157,32 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 	}
 }
 
+// applyConnectionOrder changes the order on an existing endpoint and restarts
+// peer-relay discovery so a tsnet live update does not have to wait for a
+// future network-map refresh.
+func (de *endpoint) applyConnectionOrder(preference relayPreferenceForEndpoint) {
+	de.mu.Lock()
+	defer de.mu.Unlock()
+
+	de.relayPreference = preference
+	de.failedPreferredDERP = nil
+	de.preferredRelayPaths = nil
+	de.lastUDPRelayPathDiscovery = 0
+	if preference.enabled {
+		// Re-evaluate the current best path against the new ranks immediately.
+		de.trustBestAddrUntil = 0
+	}
+	if !de.isWireguardOnly && de.c.relayManager.hasPeerRelayServers.Load() {
+		de.c.relayManager.reconfigureUDPRelayPathsFor(
+			de,
+			de.bestAddr,
+			false,
+			preference,
+			de.relayCapable,
+		)
+	}
+}
+
 func (de *endpoint) bestConnectionOrderRankLocked(now mono.Time) (rank int, ok bool) {
 	if now.After(de.trustBestAddrUntil) {
 		return 0, false

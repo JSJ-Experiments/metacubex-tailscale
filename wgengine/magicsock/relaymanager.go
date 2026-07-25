@@ -60,6 +60,7 @@ type relayManager struct {
 	// The following chan fields serve event inputs to a single goroutine,
 	// runLoop().
 	startDiscoveryCh    chan endpointWithLastBest
+	reconfigureCh       chan relayReconfigureEvent
 	allocateWorkDoneCh  chan relayEndpointAllocWorkDoneEvent
 	handshakeWorkDoneCh chan relayEndpointHandshakeWorkDoneEvent
 	cancelWorkCh        chan *endpoint
@@ -210,6 +211,14 @@ func (r *relayManager) runLoop() {
 		case startDiscovery := <-r.startDiscoveryCh:
 			if !r.hasActiveWorkForEndpointRunLoop(startDiscovery.ep) {
 				r.allocateAllServersRunLoop(startDiscovery)
+			}
+			if !r.hasActiveWorkRunLoop() {
+				return
+			}
+		case reconfigure := <-r.reconfigureCh:
+			r.stopWorkRunLoop(reconfigure.ep)
+			if reconfigure.discover {
+				r.allocateAllServersRunLoop(reconfigure.endpointWithLastBest)
 			}
 			if !r.hasActiveWorkRunLoop() {
 				return
@@ -380,6 +389,7 @@ func (r *relayManager) init() {
 		r.handshakeWorkAwaitingPong = make(map[*relayHandshakeWork]addrPortVNI)
 		r.addrPortVNIToHandshakeWork = make(map[addrPortVNI]*relayHandshakeWork)
 		r.startDiscoveryCh = make(chan endpointWithLastBest)
+		r.reconfigureCh = make(chan relayReconfigureEvent)
 		r.allocateWorkDoneCh = make(chan relayEndpointAllocWorkDoneEvent)
 		r.handshakeWorkDoneCh = make(chan relayEndpointHandshakeWorkDoneEvent)
 		r.cancelWorkCh = make(chan *endpoint)
@@ -546,6 +556,11 @@ type endpointWithLastBest struct {
 	relayPreference   relayPreferenceForEndpoint
 }
 
+type relayReconfigureEvent struct {
+	endpointWithLastBest
+	discover bool
+}
+
 // startUDPRelayPathDiscoveryFor starts UDP relay path discovery for ep on all
 // known relay servers if ep has no in-progress work.
 func (r *relayManager) startUDPRelayPathDiscoveryFor(ep *endpoint, lastBest addrQuality, lastBestIsTrusted bool, relayPreference relayPreferenceForEndpoint) {
@@ -554,6 +569,20 @@ func (r *relayManager) startUDPRelayPathDiscoveryFor(ep *endpoint, lastBest addr
 		lastBest:          lastBest,
 		lastBestIsTrusted: lastBestIsTrusted,
 		relayPreference:   relayPreference,
+	})
+}
+
+// reconfigureUDPRelayPathsFor atomically cancels old work and optionally
+// starts fresh discovery using an endpoint's newly applied connection order.
+func (r *relayManager) reconfigureUDPRelayPathsFor(ep *endpoint, lastBest addrQuality, lastBestIsTrusted bool, relayPreference relayPreferenceForEndpoint, discover bool) {
+	relayManagerInputEvent(r, nil, &r.reconfigureCh, relayReconfigureEvent{
+		endpointWithLastBest: endpointWithLastBest{
+			ep:                ep,
+			lastBest:          lastBest,
+			lastBestIsTrusted: lastBestIsTrusted,
+			relayPreference:   relayPreference,
+		},
+		discover: discover,
 	})
 }
 
