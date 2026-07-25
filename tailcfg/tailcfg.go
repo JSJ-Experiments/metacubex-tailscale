@@ -1574,10 +1574,16 @@ const (
 
 	// PeerCapabilityRelay grants the ability for a peer to allocate relay
 	// endpoints.
-	PeerCapabilityRelay PeerCapability = "github.com/metacubex/tailscale/cap/relay"
+	PeerCapabilityRelay PeerCapability = "tailscale.com/cap/relay"
 	// PeerCapabilityRelayTarget grants the current node the ability to allocate
 	// relay endpoints to the peer which has this capability.
-	PeerCapabilityRelayTarget PeerCapability = "github.com/metacubex/tailscale/cap/relay-target"
+	PeerCapabilityRelayTarget PeerCapability = "tailscale.com/cap/relay-target"
+	// PeerCapabilityRelayLegacy and PeerCapabilityRelayTargetLegacy retain
+	// compatibility with control servers that adopted the old metacubex fork
+	// identifiers. The official Tailscale control plane uses the constants
+	// above.
+	PeerCapabilityRelayLegacy       PeerCapability = "github.com/metacubex/tailscale/cap/relay"
+	PeerCapabilityRelayTargetLegacy PeerCapability = "github.com/metacubex/tailscale/cap/relay-target"
 
 	// PeerCapabilityTsIDP grants a peer tsidp-specific
 	// capabilities, such as the ability to add user groups to the OIDC

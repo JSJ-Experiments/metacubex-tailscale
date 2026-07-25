@@ -2453,7 +2453,7 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 			// unexpected
 			return
 		}
-		if !nodeHasCap(c.filt, peer, c.self, tailcfg.PeerCapabilityRelay) {
+		if !nodeHasAnyCap(c.filt, peer, c.self, tailcfg.PeerCapabilityRelay, tailcfg.PeerCapabilityRelayLegacy) {
 			return
 		}
 		// [Conn.mu] must not be held while publishing, or [Conn.onUDPRelayAllocResp]
@@ -2933,7 +2933,7 @@ func (c *Conn) updateRelayServersSet(filt *filter.Filter, self tailcfg.NodeView,
 			// compiled [tailcfg.CurrentCapabilityVersion]) forward.
 			continue
 		}
-		if !nodeHasCap(filt, maybeCandidate, self, tailcfg.PeerCapabilityRelayTarget) {
+		if !nodeHasAnyCap(filt, maybeCandidate, self, tailcfg.PeerCapabilityRelayTarget, tailcfg.PeerCapabilityRelayTargetLegacy) {
 			continue
 		}
 		relayServers.Add(candidatePeerRelay{
@@ -2982,6 +2982,15 @@ func nodeHasCap(filt *filter.Filter, src, dst tailcfg.NodeView, cap tailcfg.Peer
 		return !hasCap
 	})
 	return hasCap
+}
+
+func nodeHasAnyCap(filt *filter.Filter, src, dst tailcfg.NodeView, caps ...tailcfg.PeerCapability) bool {
+	for _, cap := range caps {
+		if nodeHasCap(filt, src, dst, cap) {
+			return true
+		}
+	}
+	return false
 }
 
 // candidatePeerRelay represents the identifiers and DERP home region ID for a
@@ -3335,7 +3344,7 @@ func (c *Conn) relayCandidateLocked(p tailcfg.NodeView) (ok bool, cp candidatePe
 	if !capVerIsRelayCapable(p.Cap()) {
 		return false, candidatePeerRelay{}
 	}
-	if !nodeHasCap(c.filt, p, c.self, tailcfg.PeerCapabilityRelayTarget) {
+	if !nodeHasAnyCap(c.filt, p, c.self, tailcfg.PeerCapabilityRelayTarget, tailcfg.PeerCapabilityRelayTargetLegacy) {
 		return false, candidatePeerRelay{}
 	}
 	return true, candidatePeerRelay{
