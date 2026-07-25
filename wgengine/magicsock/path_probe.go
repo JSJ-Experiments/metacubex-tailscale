@@ -5,6 +5,7 @@ package magicsock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -93,8 +94,9 @@ func (c *Conn) ProbeConnectionPaths(ctx context.Context, target netip.Addr, path
 		return nil, fmt.Errorf("unknown peer %v", target)
 	}
 
+	eligiblePeerRelays := c.PeerRelays()
 	ep.mu.Lock()
-	candidates := ep.connectionPathCandidatesLocked(paths)
+	candidates := ep.connectionPathCandidatesLocked(paths, eligiblePeerRelays.Contains)
 	results := make([]ConnectionPathProbe, len(candidates))
 	type response struct {
 		index int
@@ -104,9 +106,9 @@ func (c *Conn) ProbeConnectionPaths(ctx context.Context, target netip.Addr, path
 	pending := 0
 	now := mono.Now()
 	for i, candidate := range candidates {
-		results[i] = ConnectionPathProbe{
-			Path:     candidate.path,
-			Endpoint: candidate.addr.String(),
+		results[i].Path = candidate.path
+		if candidate.addr.ap.IsValid() {
+			results[i].Endpoint = candidate.addr.String()
 		}
 		if candidate.err != nil {
 			results[i].Error = candidate.err.Error()
@@ -146,7 +148,7 @@ func (c *Conn) ProbeConnectionPaths(ctx context.Context, target netip.Addr, path
 	return results, nil
 }
 
-func (de *endpoint) connectionPathCandidatesLocked(paths []string) []connectionPathCandidate {
+func (de *endpoint) connectionPathCandidatesLocked(paths []string, eligiblePeerRelay func(netip.Addr) bool) []connectionPathCandidate {
 	var candidates []connectionPathCandidate
 	dm := de.c.derpMapAtomic.Load()
 	for _, rawPath := range paths {
@@ -173,9 +175,13 @@ func (de *endpoint) connectionPathCandidatesLocked(paths []string) []connectionP
 			relayIP, _ := netip.ParseAddr(path)
 			relay, ok := de.preferredRelayPaths[relayIP]
 			if !ok {
+				err := "peer relay allocation is not ready"
+				if eligiblePeerRelay == nil || !eligiblePeerRelay(relayIP) {
+					err = "peer is not advertised as an eligible relay"
+				}
 				candidates = append(candidates, connectionPathCandidate{
 					path: relayIP.String(),
-					err:  fmt.Errorf("peer relay path is not ready"),
+					err:  errors.New(err),
 				})
 				continue
 			}

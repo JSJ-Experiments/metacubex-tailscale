@@ -32,7 +32,9 @@ func TestConnectionPathCandidates(t *testing.T) {
 		},
 	}
 
-	got := ep.connectionPathCandidatesLocked([]string{"DIRECT", relayIP.String(), "tyo", "XXX"})
+	got := ep.connectionPathCandidatesLocked([]string{"DIRECT", relayIP.String(), "tyo", "XXX"}, func(ip netip.Addr) bool {
+		return ip == relayIP
+	})
 	if len(got) != 4 {
 		t.Fatalf("candidate count = %d, want 4", len(got))
 	}
@@ -194,5 +196,35 @@ func TestConnectionOrderDirect(t *testing.T) {
 	udpAddr, derpAddr, _ = ep.addrForSendLocked(now)
 	if udpAddr != directAddr || derpAddr.IsValid() {
 		t.Fatalf("path after TYO failure = (%v, %v), want direct %v", udpAddr, derpAddr, directAddr)
+	}
+}
+
+func TestConnectionOrderSilentDERPFallsBack(t *testing.T) {
+	now := mono.Now()
+	derpAddr := netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, 1)
+	directAddr := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:1234")}
+	ep := &endpoint{
+		c: newConn(logger.Discard),
+		relayPreference: relayPreferenceForEndpoint{
+			enabled:    true,
+			directRank: 1,
+			derpFallbacks: []preferredDERP{{
+				addr: derpAddr,
+				rank: 0,
+			}},
+		},
+		bestAddr:           addrQuality{epAddr: directAddr},
+		trustBestAddrUntil: now.Add(time.Minute),
+	}
+
+	if ep.preferredDERPStalledLocked(derpAddr, 0, now) {
+		t.Fatal("newly selected DERP path was immediately considered stalled")
+	}
+	if !ep.preferredDERPStalledLocked(derpAddr, 0, now.Add(preferredDERPSilentTimeout)) {
+		t.Fatal("silent DERP path was not failed after its health timeout")
+	}
+	udpAddr, gotDERP, _ := ep.addrForSendLocked(now.Add(preferredDERPSilentTimeout))
+	if udpAddr != directAddr || gotDERP.IsValid() {
+		t.Fatalf("path after silent DERP = (%v, %v), want direct %v", udpAddr, gotDERP, directAddr)
 	}
 }

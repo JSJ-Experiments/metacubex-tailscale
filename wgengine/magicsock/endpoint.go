@@ -89,6 +89,9 @@ type endpoint struct {
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 	relayPreference           relayPreferenceForEndpoint
 	failedPreferredDERP       map[int]mono.Time
+	preferredDERPHealthAddr   netip.AddrPort
+	preferredDERPHealthSince  mono.Time
+	preferredDERPHealthRecvWG mono.Time
 	preferredRelayPaths       map[netip.Addr]addrQuality
 
 	bestAddr           addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
@@ -166,6 +169,7 @@ func (de *endpoint) applyConnectionOrder(preference relayPreferenceForEndpoint) 
 
 	de.relayPreference = preference
 	de.failedPreferredDERP = nil
+	de.clearPreferredDERPHealthLocked()
 	de.preferredRelayPaths = nil
 	de.lastUDPRelayPathDiscovery = 0
 	if preference.enabled {
@@ -197,7 +201,45 @@ func (de *endpoint) bestConnectionOrderRankLocked(now mono.Time) (rank int, ok b
 	}
 }
 
-const preferredDERPFailureBackoff = 30 * time.Second
+const (
+	preferredDERPFailureBackoff = 30 * time.Second
+	preferredDERPSilentTimeout  = 5 * time.Second
+)
+
+func (de *endpoint) clearPreferredDERPHealthLocked() {
+	de.preferredDERPHealthAddr = netip.AddrPort{}
+	de.preferredDERPHealthSince = 0
+	de.preferredDERPHealthRecvWG = 0
+}
+
+// preferredDERPStalledLocked tracks whether WireGuard traffic has returned
+// while an ordered DERP path is carrying outgoing packets. A successful local
+// queue write only proves that we can write to the DERP connection; it does not
+// prove that the peer is reachable through that region.
+func (de *endpoint) preferredDERPStalledLocked(addr netip.AddrPort, rank int, now mono.Time) bool {
+	lastRecvWG := de.lastRecvWG.LoadAtomic()
+	if de.preferredDERPHealthAddr != addr {
+		de.preferredDERPHealthAddr = addr
+		de.preferredDERPHealthSince = now
+		de.preferredDERPHealthRecvWG = lastRecvWG
+		return false
+	}
+	if lastRecvWG.After(de.preferredDERPHealthRecvWG) {
+		de.preferredDERPHealthSince = now
+		de.preferredDERPHealthRecvWG = lastRecvWG
+		return false
+	}
+	if now.Sub(de.preferredDERPHealthSince) < preferredDERPSilentTimeout {
+		return false
+	}
+	if de.failedPreferredDERP == nil {
+		de.failedPreferredDERP = make(map[int]mono.Time)
+	}
+	de.failedPreferredDERP[rank] = now
+	de.c.logf("magicsock: connection order: node %v DERP path %v returned no WireGuard traffic; trying next path", de.publicKey.ShortString(), addr)
+	de.clearPreferredDERPHealthLocked()
+	return true
+}
 
 func (de *endpoint) preferredDERPFailedLocked(rank int, now mono.Time) bool {
 	failedAt, failed := de.failedPreferredDERP[rank]
@@ -220,6 +262,7 @@ func (de *endpoint) notePreferredDERPFailure(regionID int) {
 				de.failedPreferredDERP = make(map[int]mono.Time)
 			}
 			de.failedPreferredDERP[derp.rank] = mono.Now()
+			de.clearPreferredDERPHealthLocked()
 			return
 		}
 	}
@@ -1175,6 +1218,23 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				break
 			}
 		}
+		if derpRank >= 0 && de.preferredDERPStalledLocked(derpAddr, derpRank, now) {
+			// Re-evaluate now that the silent DERP rank is temporarily failed,
+			// so this packet can use the next ordered path.
+			udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+			derpRank = -1
+			for _, preferred := range de.relayPreference.derpFallbacks {
+				if preferred.addr == derpAddr {
+					derpRank = preferred.rank
+					break
+				}
+			}
+			if derpRank >= 0 {
+				de.preferredDERPStalledLocked(derpAddr, derpRank, now)
+			}
+		} else if derpRank < 0 {
+			de.clearPreferredDERPHealthLocked()
+		}
 	}
 
 	if de.isWireguardOnly {
@@ -1681,6 +1741,7 @@ func (de *endpoint) updateFromNode(n tailcfg.NodeView, heartbeatDisabled bool, p
 	}
 	de.relayPreference = de.c.relayPreferenceForNode(n)
 	de.failedPreferredDERP = nil
+	de.clearPreferredDERPHealthLocked()
 	de.preferredRelayPaths = nil
 
 	de.setEndpointsLocked(n.Endpoints())
